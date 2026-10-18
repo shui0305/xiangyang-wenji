@@ -416,6 +416,10 @@ html[data-theme="dark"] .write-hero{color:#1a1510}
     <div class="lb">背景</div>
     <div class="opts" id="optTh"></div>
   </div>
+  <div class="sh-row">
+    <div class="lb">朗读语速</div>
+    <div class="opts" id="optSpk"></div>
+  </div>
   <div class="prev-box"><p>她把日子写下来，日子就没有白白过去。</p></div>
   <div class="sh-h" style="margin-top:16px;border-top:1px solid var(--line);padding-top:16px"><span>云端同步 · Supabase</span></div>
   <div class="sh-row" style="padding-top:4px"><div class="lb">项目地址</div><input id="sbUrl" class="sb-in" spellcheck="false"></div>
@@ -1008,25 +1012,79 @@ window.addEventListener('scroll',function(){
   if(cur.view==='read') onScrollProg();
 },{passive:true});
 
-/* ============ 朗读 ============ */
-var speaking=false;
+/* ============ 朗读（增强：优质音色 + 分句播放 + 防卡死） ============ */
+var speaking=false,spkChunks=[],spkIdx=0,spkVoice=null,spkWatch=null,spkLast=0;
+var SPK_RATE=0.9;
+try{ var __c=store.get('cfg',null); if(__c&&__c.spkRate) SPK_RATE=__c.spkRate }catch(e){}
+var SPK_RATES=[[0.75,'慢'],[0.9,'舒适'],[1.1,'快']];
+
+function pickVoice(){
+  if(!('speechSynthesis' in window)) return null;
+  var all=window.speechSynthesis.getVoices()||[];
+  if(!all.length) return null;
+  var zh=all.filter(function(v){ return /^zh|cmn/i.test(v.lang) });
+  var pool=zh.length?zh:all;
+  // 优先挑选好听的神经音色（华为/小米/讯飞/苹果/谷歌常见命名）
+  var pref=[/小晓|Xiaoxiao/i,/云希|Yunxi/i,/晓伊/i,/云健/i,/云扬/i,/小燕/i,/晓晓/i,
+            /婷婷|Ting-?Ting/i,/Google 普通话|Google.*Mandarin/i,/Meijia|美佳/i,/Sinji/i,/Yating/i,/Huihui/i,/Kangkang/i];
+  for(var i=0;i<pref.length;i++)
+    for(var j=0;j<pool.length;j++){ if(pref[i].test(pool[j].name)) return pool[j] }
+  for(var k=0;k<pool.length;k++) if(/zh[-_]CN/i.test(pool[k].lang)) return pool[k];
+  return pool[0]||null;
+}
+if('speechSynthesis' in window){
+  spkVoice=pickVoice();
+  window.speechSynthesis.onvoiceschanged=function(){ spkVoice=pickVoice() };
+}
+/* 长文切短句：手机朗读长段落容易中途哑掉，切成 25~55 字的小句逐句播 */
+function spkText(t){
+  var s=(t||'').replace(/\s+/g,' ').trim(); if(!s) return [];
+  var out=[],buf='';
+  for(var i=0;i<s.length;i++){
+    buf+=s[i];
+    var c=s[i];
+    if((/[。！？；!?;]/.test(c)&&buf.length>=25)||buf.length>=55){ out.push(buf); buf='' }
+  }
+  if(buf) out.push(buf);
+  return out;
+}
 function setSpk(s){ $$('.spkState').forEach(function(b){ b.textContent=s }) }
+function stopSpeak(){
+  if(spkWatch){ clearInterval(spkWatch); spkWatch=null }
+  if('speechSynthesis' in window){ try{ window.speechSynthesis.cancel() }catch(e){} }
+  speaking=false; setSpk('▶');
+}
+function speakNext(){
+  if(!speaking) return;
+  if(spkIdx>=spkChunks.length){ stopSpeak(); return }
+  spkLast=Date.now();
+  var u=new SpeechSynthesisUtterance(spkChunks[spkIdx++]);
+  if(spkVoice){ try{ u.voice=spkVoice }catch(e){} }
+  u.lang=(spkVoice&&spkVoice.lang)||'zh-CN';
+  u.rate=SPK_RATE; u.pitch=1;
+  u.onend=function(){ if(speaking) speakNext() };
+  u.onerror=function(){ if(speaking) speakNext() };
+  try{ window.speechSynthesis.speak(u) }catch(e){ stopSpeak(); }
+}
 function toggleSpeak(){
-  if(!('speechSynthesis' in window)){ toast('这个浏览器不支持朗读，可以试试手机自带的「朗读屏幕」'); return }
-  if(speaking){ window.speechSynthesis.cancel(); speaking=false; setSpk('▶'); return }
+  if(!('speechSynthesis' in window)){ toast('这个浏览器不支持朗读，可以试试手机自带的「朗读屏幕」功能'); return }
+  if(speaking){ stopSpeak(); return }
   var e=ESS[cur.arg]; if(!e) return;
-  var u=new SpeechSynthesisUtterance(e.t+'。'+e.x.replace(/\n/g,'。'));
-  u.lang='zh-CN'; u.rate=0.85; u.pitch=1;
-  u.onend=function(){ speaking=false; setSpk('▶'); };
-  u.onerror=function(){ speaking=false; setSpk('▶'); };
-  window.speechSynthesis.cancel();
-  window.speechSynthesis.speak(u);
-  speaking=true;
-  setSpk('■');
-  toast('正在朗读，再点一下就停');
+  spkVoice=pickVoice()||spkVoice;
+  spkChunks=spkText(e.t+'。'+e.x.replace(/\n+/g,'。'));
+  spkIdx=0; speaking=true; setSpk('■');
+  speakNext();
+  /* 看门狗：手机上朗读偶发"假死"（队列停了但没结束），每 4 秒检查续播 */
+  if(spkWatch) clearInterval(spkWatch);
+  spkWatch=setInterval(function(){
+    if(!speaking){ clearInterval(spkWatch); spkWatch=null; return }
+    var S=window.speechSynthesis;
+    if(!S.speaking&&!S.pending&&spkIdx<spkChunks.length&&Date.now()-spkLast>2500){ speakNext() }
+  },4000);
+  toast(spkVoice?('正在用「'+spkVoice.name+'」朗读 · 再点一下停'):'正在朗读 · 再点一下停');
 }
 window.addEventListener('hashchange',function(){
-  if(speaking){ try{window.speechSynthesis.cancel()}catch(e){} speaking=false }
+  if(speaking) stopSpeak();
 });
 
 /* ============ 写一篇 · 编辑器 ============ */
@@ -1214,8 +1272,11 @@ function renderSet(){
   $('#optTh').innerHTML=THS.map(function(x){
     return '<button class="'+(cfg.th===x[0]?'on':'')+'" onclick="setCfg(\'th\',\''+x[0]+'\')">'+x[1]+'</button>'
   }).join('');
+  $('#optSpk').innerHTML=SPK_RATES.map(function(x){
+    return '<button class="'+(Math.abs((cfg.spkRate||0.9)-x[0])<0.01?'on':'')+'" onclick="setCfg(\'spkRate\','+x[0]+')">'+x[1]+'</button>'
+  }).join('');
 }
-function setCfg(k,v){ cfg[k]=v; if(k==='fs') cfg.fs=parseInt(v,10); applyCfg(); renderSet() }
+function setCfg(k,v){ cfg[k]=v; if(k==='fs') cfg.fs=parseInt(v,10); if(k==='spkRate'){ cfg.spkRate=parseFloat(v); SPK_RATE=cfg.spkRate } applyCfg(); renderSet() }
 function openSet(){ renderSet(); var u=$('#sbUrl'),k=$('#sbKey'); if(u)u.value=CLOUD.url; if(k)k.value=CLOUD.key; $('#mask').classList.add('show'); $('#sheet').classList.add('show') }
 function closeSet(){ $('#mask').classList.remove('show'); $('#sheet').classList.remove('show') }
 applyCfg();
