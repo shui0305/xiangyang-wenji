@@ -420,6 +420,10 @@ html[data-theme="dark"] .write-hero{color:#1a1510}
     <div class="lb">朗读语速</div>
     <div class="opts" id="optSpk"></div>
   </div>
+  <div class="sh-row">
+    <div class="lb">朗读声音</div>
+    <div class="opts" id="optEng"></div>
+  </div>
   <div class="prev-box"><p>她把日子写下来，日子就没有白白过去。</p></div>
   <div class="sh-h" style="margin-top:16px;border-top:1px solid var(--line);padding-top:16px"><span>云端同步 · Supabase</span></div>
   <div class="sh-row" style="padding-top:4px"><div class="lb">项目地址</div><input id="sbUrl" class="sb-in" spellcheck="false"></div>
@@ -1014,11 +1018,14 @@ window.addEventListener('scroll',function(){
   if(cur.view==='read') onScrollProg();
 },{passive:true});
 
-/* ============ 朗读（增强：优质音色 + 分句播放 + 防卡死） ============ */
+/* ============ 朗读（双引擎：① 网页内置 AI 在线朗读 ② 系统朗读兜底） ============ */
 var speaking=false,spkChunks=[],spkIdx=0,spkVoice=null,spkWatch=null,spkLast=0;
 var SPK_RATE=0.9;
 try{ var __c=store.get('cfg',null); if(__c&&__c.spkRate) SPK_RATE=__c.spkRate }catch(e){}
 var SPK_RATES=[[0.75,'慢'],[0.9,'舒适'],[1.1,'快']];
+var SPK_ENGINES=[['ai','AI 在线（推荐）'],['sys','手机系统']];
+var SPK_ENGINE='ai';
+try{ var __eg=store.get('cfg',null); if(__eg&&__eg.spkEngine) SPK_ENGINE=__eg.spkEngine }catch(e){}
 
 function pickVoice(){
   if(!('speechSynthesis' in window)) return null;
@@ -1026,7 +1033,6 @@ function pickVoice(){
   if(!all.length) return null;
   var zh=all.filter(function(v){ return /^zh|cmn/i.test(v.lang) });
   var pool=zh.length?zh:all;
-  // 优先挑选好听的神经音色（华为/小米/讯飞/苹果/谷歌常见命名）
   var pref=[/小晓|Xiaoxiao/i,/云希|Yunxi/i,/晓伊/i,/云健/i,/云扬/i,/小燕/i,/晓晓/i,
             /婷婷|Ting-?Ting/i,/Google 普通话|Google.*Mandarin/i,/Meijia|美佳/i,/Sinji/i,/Yating/i,/Huihui/i,/Kangkang/i];
   for(var i=0;i<pref.length;i++)
@@ -1038,7 +1044,7 @@ if('speechSynthesis' in window){
   spkVoice=pickVoice();
   window.speechSynthesis.onvoiceschanged=function(){ spkVoice=pickVoice() };
 }
-/* 长文切短句：手机朗读长段落容易中途哑掉，切成 25~55 字的小句逐句播 */
+/* 长文切短句：系统朗读长段落容易中途哑掉，切成 25~55 字的小句逐句播 */
 function spkText(t){
   var s=(t||'').replace(/\s+/g,' ').trim(); if(!s) return [];
   var out=[],buf='';
@@ -1054,8 +1060,10 @@ function setSpk(s){ $$('.spkState').forEach(function(b){ b.textContent=s }) }
 function stopSpeak(){
   if(spkWatch){ clearInterval(spkWatch); spkWatch=null }
   if('speechSynthesis' in window){ try{ window.speechSynthesis.cancel() }catch(e){} }
+  aioStop();
   speaking=false; setSpk('▶');
 }
+/* ---- 引擎②：系统朗读（分句 + 看门狗） ---- */
 function speakNext(){
   if(!speaking) return;
   if(spkIdx>=spkChunks.length){ stopSpeak(); return }
@@ -1068,22 +1076,75 @@ function speakNext(){
   u.onerror=function(){ if(speaking) speakNext() };
   try{ window.speechSynthesis.speak(u) }catch(e){ stopSpeak(); }
 }
-function toggleSpeak(){
-  if(!('speechSynthesis' in window)){ toast('这个浏览器不支持朗读，可以试试手机自带的「朗读屏幕」功能'); return }
-  if(speaking){ stopSpeak(); return }
-  var e=ESS[cur.arg]; if(!e) return;
+function speakSys(e){
+  if(!('speechSynthesis' in window)){ toast('这个浏览器不支持系统朗读'); stopSpeak(); return }
   spkVoice=pickVoice()||spkVoice;
   spkChunks=spkText(e.t+'。'+e.x.replace(/\n+/g,'。'));
-  spkIdx=0; speaking=true; setSpk('■');
+  spkIdx=0;
   speakNext();
-  /* 看门狗：手机上朗读偶发"假死"（队列停了但没结束），每 4 秒检查续播 */
+  /* 看门狗：系统朗读偶发"假死"，每 4 秒检查续播 */
   if(spkWatch) clearInterval(spkWatch);
   spkWatch=setInterval(function(){
     if(!speaking){ clearInterval(spkWatch); spkWatch=null; return }
     var S=window.speechSynthesis;
     if(!S.speaking&&!S.pending&&spkIdx<spkChunks.length&&Date.now()-spkLast>2500){ speakNext() }
   },4000);
-  toast(spkVoice?('正在用「'+spkVoice.name+'」朗读 · 再点一下停'):'正在朗读 · 再点一下停');
+}
+/* ---- 引擎①：网页内置 AI 朗读（百度云端音色，国内直连、免密钥；用 audio 标签直接播放，不受跨域和手机浏览器 TTS 限制） ---- */
+var AIO={au:null};
+function aioStop(){
+  if(AIO.au){ try{ AIO.au.pause(); AIO.au.src='' }catch(e){} AIO.au=null }
+}
+function aioSegs(t){                          // 长文按 ~180 字分段（接口上限约 200 字）
+  var s=(t||'').replace(/\s+/g,' ').trim(); if(!s) return [];
+  var out=[],buf='';
+  for(var i=0;i<s.length;i++){
+    buf+=s[i];
+    if((/[。！？；!?;]/.test(s[i])&&buf.length>=90)||buf.length>=180){ out.push(buf); buf='' }
+  }
+  if(buf) out.push(buf);
+  return out;
+}
+function aioSpd(){ return SPK_RATE<=0.8?4:(SPK_RATE>=1.05?6:5) }   // 百度 spd 1-9
+function aioSpeakAll(text,done,fail){
+  var segs=aioSegs(text), i=0, played=0, failed=false;
+  (function next(){
+    if(!speaking) return;
+    if(i>=segs.length){ done(); return }
+    var au=new Audio();
+    AIO.au=au;
+    var started=false;
+    var to=setTimeout(function(){ if(!started){ onErr() } },15000);   // 15 秒起不来就换路
+    function onErr(){
+      clearTimeout(to); AIO.au=null;
+      if(!failed&&played===0){ failed=true; fail() }                 // 第一段就没声 → 自动换系统朗读
+      else { i++; next() }                                           // 中途某段失败 → 跳过继续
+    }
+    au.onplaying=function(){ started=true; clearTimeout(to) };
+    au.onended=function(){ clearTimeout(to); AIO.au=null; i++; played++; next() };
+    au.onerror=onErr;
+    au.src='https://fanyi.baidu.com/gettts?lan=zh&text='+encodeURIComponent(segs[i])+'&spd='+aioSpd()+'&source=web';
+    var p=au.play();
+    if(p&&p.catch) p.catch(function(){ clearTimeout(to); AIO.au=null;
+      if(!failed&&played===0){ failed=true; fail() } });
+  })();
+}
+/* ---- 总入口：AI 优先，失败自动退回系统 ---- */
+function toggleSpeak(){
+  if(speaking){ stopSpeak(); return }
+  var e=ESS[cur.arg]; if(!e) return;
+  if(!e.x){ toast('这篇没有正文，读不了'); return }
+  speaking=true; setSpk('■'); spkLast=Date.now();
+  if(SPK_ENGINE==='ai'&&(navigator.onLine!==false)&&window.Audio){
+    aioSpeakAll(e.t+'。'+e.x.replace(/\n+/g,'。'),
+      function(){ stopSpeak() },
+      function(){ toast('AI 朗读连不上，已改用系统朗读'); if(speaking) speakSys(e) });
+    toast('AI 音色朗读中 · 再点一下停');
+  } else {
+    if(!('speechSynthesis' in window)){ toast('当前环境无法朗读'); stopSpeak(); return }
+    speakSys(e);
+    toast('系统朗读中 · 再点一下停');
+  }
 }
 window.addEventListener('hashchange',function(){
   if(speaking) stopSpeak();
@@ -1277,8 +1338,11 @@ function renderSet(){
   $('#optSpk').innerHTML=SPK_RATES.map(function(x){
     return '<button class="'+(Math.abs((cfg.spkRate||0.9)-x[0])<0.01?'on':'')+'" onclick="setCfg(\'spkRate\','+x[0]+')">'+x[1]+'</button>'
   }).join('');
+  $('#optEng').innerHTML=SPK_ENGINES.map(function(x){
+    return '<button class="'+((cfg.spkEngine||'ai')===x[0]?'on':'')+'" onclick="setCfg(\'spkEngine\',\''+x[0]+'\')">'+x[1]+'</button>'
+  }).join('');
 }
-function setCfg(k,v){ cfg[k]=v; if(k==='fs') cfg.fs=parseInt(v,10); if(k==='spkRate'){ cfg.spkRate=parseFloat(v); SPK_RATE=cfg.spkRate } applyCfg(); renderSet() }
+function setCfg(k,v){ cfg[k]=v; if(k==='fs') cfg.fs=parseInt(v,10); if(k==='spkRate'){ cfg.spkRate=parseFloat(v); SPK_RATE=cfg.spkRate } if(k==='spkEngine'){ cfg.spkEngine=v; SPK_ENGINE=v } applyCfg(); renderSet() }
 function openSet(){ renderSet(); var u=$('#sbUrl'),k=$('#sbKey'); if(u)u.value=CLOUD.url; if(k)k.value=CLOUD.key; $('#mask').classList.add('show'); $('#sheet').classList.add('show') }
 function closeSet(){ $('#mask').classList.remove('show'); $('#sheet').classList.remove('show') }
 applyCfg();
