@@ -476,6 +476,7 @@ function mergeMy(){
     ESS.push({id:N_BUILTIN+i,t:u.t||'无题',d:u.d||'',p:u.p||1,x:x,xl:x.toLowerCase(),
       n:x.replace(/\s/g,'').length,dt:u.t||'无题',mine:1,uid:u.uid});
   });
+  if(typeof rebuildIdx==='function') rebuildIdx();   // 家人文章变动 → 目录/年份索引同步刷新
 }
 mergeMy();
 
@@ -624,25 +625,26 @@ function copyText(t){
   } else fb();
 }
 
-/* 同辑内同名标注 */
-(function(){
+/* 同辑内同名标注 + 目录索引（rebuildIdx：家人新增/删除文章后自动更新目录） */
+var YEAR={},YEAR_KEYS=[],NODATE=[],BYPART={};
+function rebuildIdx(){
   var seen={};
+  ESS.forEach(function(e){ e.dt=e.t });      // 先复位显示名，再标同名
   ESS.forEach(function(e){
     var k=e.p+'|'+e.t;
     if(!seen[k]){seen[k]=1}else{seen[k]++; e.dt=e.t+'（'+['','二','三','四','五'][Math.min(seen[k]-1,4)]+'）'}
   });
-})();
-
-var YEAR={};
-ESS.forEach(function(e){
-  var y=e.d?e.d.slice(0,4):'';
-  if(y){ (YEAR[y]=YEAR[y]||[]).push(e.id) }
-});
-var YEAR_KEYS=Object.keys(YEAR).sort();
-var NODATE=ESS.filter(function(e){return !e.d}).map(function(e){return e.id});
-
-var BYPART={};
-ESS.forEach(function(e){ (BYPART[e.p]=BYPART[e.p]||[]).push(e.id) });
+  YEAR={};
+  ESS.forEach(function(e){
+    var y=e.d?e.d.slice(0,4):'';
+    if(y){ (YEAR[y]=YEAR[y]||[]).push(e.id) }
+  });
+  YEAR_KEYS=Object.keys(YEAR).sort();
+  NODATE=ESS.filter(function(e){return !e.d}).map(function(e){return e.id});
+  BYPART={};
+  ESS.forEach(function(e){ (BYPART[e.p]=BYPART[e.p]||[]).push(e.id) });
+}
+rebuildIdx();
 
 function partName(p){ return PARTS[p]?PARTS[p].n:'' }
 function fmtNum(n){ return n>=10000?(n/10000).toFixed(1)+'万':String(n) }
@@ -734,7 +736,7 @@ function fdHTML(e){
     resLine+
     '<div class="fd-body">'+body+'</div>'+
     '<div class="fd-end">· 完 ·</div>'+
-    '<div class="fd-note">共 '+N_ESSAY+' 篇 · 约 '+fmtNum(TOTAL_CHARS)+' 字<br>想找某一篇，用下面的「目录」或「搜索」</div>';
+    '<div class="fd-note">共 '+ESS.length+' 篇 · 约 '+fmtNum(TOTAL_CHARS)+' 字<br>想找某一篇，用下面的「目录」或「搜索」</div>';
 }
 function feedBarHTML(nextId){
   var nt=ESS[nextId]?ESS[nextId].t:'';
@@ -767,7 +769,7 @@ function showToc(focus){
   cur={view:'toc'};
   var restore=backScrollToc; backScrollToc=0;
   resetChrome(); tabOn('toc'); document.body.classList.remove('no-tab');
-  header({title:'目录',sub:'共 '+N_ESSAY+' 篇 · 十个专辑',back:'#/home'});
+  header({title:'目录',sub:'共 '+ESS.length+' 篇 · 十个专辑',back:'#/home'});
   if(focus==='part') ACC_STATE['p1']=true;
   if(focus==='year'&&YEAR_KEYS.length) ACC_STATE['y'+YEAR_KEYS[0]]=true;
 
@@ -863,7 +865,7 @@ var RECENT_Q=store.get('rq',[]);
 function showSearch(q){
   cur={view:'search'};
   resetChrome(); tabOn('search'); document.body.classList.remove('no-tab');
-  header({title:'搜索',sub:'在 '+N_ESSAY+' 篇里找',back:'#/home'});
+  header({title:'搜索',sub:'在 '+ESS.length+' 篇里找',back:'#/home'});
   var h='<div class="page">'+
     '<div class="searchbar">'+
       '<svg viewBox="0 0 24 24" style="width:20px;height:20px;stroke:var(--ink3);fill:none;stroke-width:1.8;flex:none"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg>'+
