@@ -425,9 +425,10 @@ html[data-theme="dark"] .write-hero{color:#1a1510}
     <button onclick="sbTest()">测试连接</button>
     <button onclick="sbPush()">上传我的文章</button>
     <button onclick="sbPull()">下载合并</button>
+    <button onclick="sbPushPhotos()" style="grid-column:1 / span 2">同步本机换过的照片到云端</button>
   </div></div>
   <div class="sh-row"><button class="btn btn-ghost" style="width:100%" onclick="sbSQL()">复制建表 SQL（首次使用先建表）</button></div>
-  <div class="sb-msg" id="sbMsg">我的文章存本机；填好 Supabase 地址后可上传云端，家人换手机也能拉回来。</div>
+  <div class="sb-msg" id="sbMsg">我的文章和换过的照片都存本机；连上 Supabase 后自动同步云端，全家共享、换手机也能拉回来。</div>
   <div style="height:10px"></div>
 </div>
 
@@ -469,7 +470,7 @@ function mergeMy(){
   MY.forEach(function(u,i){
     var x=u.x||'';
     ESS.push({id:N_BUILTIN+i,t:u.t||'无题',d:u.d||'',p:u.p||1,x:x,xl:x.toLowerCase(),
-      n:x.replace(/\s/g,'').length,dt:u.t||'无题',mine:1});
+      n:x.replace(/\s/g,'').length,dt:u.t||'无题',mine:1,uid:u.uid});
   });
 }
 mergeMy();
@@ -478,13 +479,19 @@ mergeMy();
 var SC_META=DATA.scenes, SCENE=DATA.scene, KW=DATA.kw;
 function sceneOf(id){ return SC_META[(SCENE[id]==null)?1:SCENE[id]]||SC_META[1] }
 function sceneImg(id){ var i=(SCENE[id]==null)?1:SCENE[id]; return IMG['s'+(i<9?'0':'')+(i+1)] }
-/* ---- 可替换照片：本机相册 ---- */
+/* ---- 可替换照片：本机 + 云端（Supabase xy_photos） ---- */
 var IMGP='xy_reader_img_';                      // 每篇一个独立 key，避免整包重写
+var CLOUDPH={};                                 // 云端照片 pid -> dataURL（内存缓存，不占本机空间）
 function myImg(id){ try{ return localStorage.getItem(IMGP+id) }catch(e){ return null } }
-function imgOf(id){ return myImg(id)||sceneImg(id) }
+function photoKey(id){                          // 云端主键：家人写的文章用稳定 uid，内建篇用 id
+  var e=ESS[id];
+  return (e&&e.mine&&e.uid)?('img_'+e.uid):('img_'+id);
+}
+function imgOf(id){ return myImg(id)||CLOUDPH[photoKey(id)]||sceneImg(id) }
+function hasMy(id){ return !!(myImg(id)||CLOUDPH[photoKey(id)]) }
 var __pickId=-1;
 function illusHTML(id,small){
-  var m=sceneOf(id), off=25+((id*37)%50), my=!!myImg(id);
+  var m=sceneOf(id), off=25+((id*37)%50), my=hasMy(id);
   return '<figure class="illus'+(small?' sm':'')+'" id="ilu'+id+'">'+
     '<img loading="lazy" src="'+imgOf(id)+'"'+(my?'':' style="object-position:50% '+off+'%"')+' onload="this.classList.add(\'ld\')" onclick="pickImg('+id+')" alt="">'+
     '<figcaption><span class="cap-l">'+(my?'我的照片 · 点图可换':'AI 插画 · '+esc(m.n)+' · 点图可换')+'</span>'+
@@ -496,12 +503,60 @@ function illusHTML(id,small){
 function pickImg(id){ __pickId=id; var f=$('#imgfile'); if(f){ f.value=''; f.click() } }
 function resetImg(id){
   try{ localStorage.removeItem(IMGP+id) }catch(e){}
+  var pk=photoKey(id), hadCloud=!!CLOUDPH[pk];
+  delete CLOUDPH[pk];
+  if(hadCloud&&CLOUD.url){                       // 云端有就一起删掉，全家都恢复默认
+    fetch(CLOUD.url+'/rest/v1/xy_photos?pid=eq.'+encodeURIComponent(pk),{method:'DELETE',headers:sbHdr()})
+    .catch(function(){});
+  }
   refreshIllus(id); toast('已恢复默认插画');
+}
+function sbPhotoPush(id,du,quiet){
+  if(!CLOUD.url||!CLOUD.key) return;
+  fetch(CLOUD.url+'/rest/v1/xy_photos',{
+    method:'POST', headers:sbHdr({'Prefer':'resolution=merge-duplicates,return=minimal'}),
+    body:JSON.stringify([{pid:photoKey(id),data:du,updated_at:new Date().toISOString()}])
+  }).then(function(r){
+    if(r.status===200||r.status===201){ CLOUDPH[photoKey(id)]=du; if(!quiet) toast('照片已同步到云端，全家可见') }
+    else if(!quiet) r.text().then(function(t){ toast('云端同步失败 '+(t.indexOf('PGRST205')>=0?'：还没有 xy_photos 表，先在设置里运行建表 SQL':t.slice(0,60))) });
+  }).catch(function(){ if(!quiet) toast('云端同步失败：网络问题，照片仍保存在本机') });
+}
+function sbPushPhotos(){                        // 把本机已换过的照片全部推上云端
+  var ids=[];
+  try{ for(var i=0;i<localStorage.length;i++){ var k=localStorage.key(i); if(k&&k.indexOf(IMGP)===0) ids.push(k.slice(IMGP.length)) } }catch(e){}
+  if(!ids.length){ sbMsg('本机还没有换过照片。','err'); return }
+  sbMsg('正在上传 '+ids.length+' 张照片……');
+  var rows=ids.map(function(id){
+    var e=ESS[+id];
+    var pid=(e&&e.mine&&e.uid)?('img_'+e.uid):('img_'+id);
+    return {pid:pid,data:localStorage.getItem(IMGP+id),updated_at:new Date().toISOString()};
+  });
+  fetch(CLOUD.url+'/rest/v1/xy_photos',{
+    method:'POST', headers:sbHdr({'Prefer':'resolution=merge-duplicates,return=minimal'}),
+    body:JSON.stringify(rows)
+  }).then(function(r){
+    if(r.status===200||r.status===201){
+      rows.forEach(function(x){ CLOUDPH[x.pid]=x.data });
+      sbMsg('✓ 已上传 '+rows.length+' 张照片到云端，家人打开就能看到。','ok');
+    } else r.text().then(function(t){ sbMsg('上传失败 '+r.status+'：'+(t.indexOf('PGRST205')>=0?'还没有 xy_photos 表，先运行下面的建表 SQL':t.slice(0,120)),'err') });
+  }).catch(function(e){ sbMsg('上传失败：'+(e.message||'网络错误'),'err') });
+}
+function sbPhotoPull(){
+  if(!CLOUD.url||!CLOUD.key) return;
+  fetch(CLOUD.url+'/rest/v1/xy_photos?select=pid,data',{headers:sbHdr()})
+  .then(function(r){ return r.status===200?r.json():[] })
+  .then(function(rows){
+    if(!rows||!rows.length||rows.error) return;
+    rows.forEach(function(x){ if(x.pid&&x.data) CLOUDPH[x.pid]=x.data });
+    $$('.illus').forEach(function(f){            // 刷新当前页面上已显示的插图
+      var mm=f.id.match(/^ilu(\d+)$/); if(mm) refreshIllus(parseInt(mm[1],10));
+    });
+  }).catch(function(){});
 }
 function refreshIllus(id){
   var f=document.getElementById('ilu'+id); if(!f) return;
   var img=f.querySelector('img'); if(!img) return;
-  var my=!!myImg(id), m=sceneOf(id), off=25+((id*37)%50);
+  var my=hasMy(id), m=sceneOf(id), off=25+((id*37)%50);
   img.src=imgOf(id);
   img.style.objectPosition=my?'':'50% '+off+'%';
   var cap=f.querySelector('.cap-l');
@@ -528,7 +583,7 @@ function onImgPick(ev){
         try{ du=cv.toDataURL('image/jpeg',0.45); localStorage.setItem(IMGP+id,du) }
         catch(e2){ toast('存储空间不够，选一张小一点的照片'); return }
       }
-      refreshIllus(id); toast('已换成你的照片');
+      refreshIllus(id); sbPhotoPush(id,du); toast('已换成你的照片');
     };
     im.onerror=function(){ toast('照片读取失败，换一张试试') };
     im.src=rd.result;
@@ -1056,7 +1111,7 @@ function edDel(idx){
 
 /* ============ Supabase 云同步 ============ */
 var CLOUD=store.get('cloud',{url:'https://dekjklexsgpgkcwgcptn.supabase.co',key:'sb_publishable_1Ah1BzCENHrm_gfjRIuxHw_FJxk_mUA'});
-var SB_SQL='create table if not exists public.xy_articles (\n  id text primary key,\n  title text not null default \'\',\n  part int not null default 1,\n  date text not null default \'\',\n  body text not null default \'\',\n  updated_at timestamptz not null default now()\n);\nalter table public.xy_articles enable row level security;\ndrop policy if exists "xy_articles_all" on public.xy_articles;\ncreate policy "xy_articles_all" on public.xy_articles for all using (true) with check (true);';
+var SB_SQL='create table if not exists public.xy_articles (\n  id text primary key,\n  title text not null default \'\',\n  part int not null default 1,\n  date text not null default \'\',\n  body text not null default \'\',\n  updated_at timestamptz not null default now()\n);\nalter table public.xy_articles enable row level security;\ndrop policy if exists "xy_articles_all" on public.xy_articles;\ncreate policy "xy_articles_all" on public.xy_articles for all using (true) with check (true);\n\n-- 照片同步表（换过的插图存这里，全家共享）\ncreate table if not exists public.xy_photos (\n  pid text primary key,\n  data text not null,\n  updated_at timestamptz not null default now()\n);\nalter table public.xy_photos enable row level security;\ndrop policy if exists "xy_photos_all" on public.xy_photos;\ncreate policy "xy_photos_all" on public.xy_photos for all using (true) with check (true);';
 function sbMsg(t,cls){ var m=$('#sbMsg'); if(!m){ toast(t); return } m.textContent=t; m.className='sb-msg '+(cls||'') }
 function sbHdr(extra){ return Object.assign({'apikey':CLOUD.key,'Authorization':'Bearer '+CLOUD.key,'Content-Type':'application/json'},extra||{}) }
 function sbSave(){
@@ -1069,11 +1124,18 @@ function sbTest(){
   sbMsg('正在连接……');
   fetch(CLOUD.url+'/rest/v1/xy_articles?select=id&limit=1',{headers:sbHdr()})
   .then(function(r){
-    if(r.status===200) sbMsg('✓ 连接成功，xy_articles 表已就绪，可以上传/下载了。','ok');
-    else r.text().then(function(t){
-      if(t.indexOf('PGRST205')>=0) sbMsg('连上了，但还没有 xy_articles 表：先点下面的「复制建表 SQL」，到 Supabase 控制台 → SQL Editor 里粘贴运行，再回来测试。','err');
-      else sbMsg('返回 '+r.status+'：'+t.slice(0,120),'err');
-    });
+    if(r.status!==200){
+      r.text().then(function(t){
+        if(t.indexOf('PGRST205')>=0) sbMsg('连上了，但还没有 xy_articles 表：先点下面的「复制建表 SQL」，到 Supabase 控制台 → SQL Editor 里粘贴运行，再回来测试。','err');
+        else sbMsg('返回 '+r.status+'：'+t.slice(0,120),'err');
+      });
+      return;
+    }
+    fetch(CLOUD.url+'/rest/v1/xy_photos?select=pid&limit=1',{headers:sbHdr()})
+    .then(function(r2){
+      if(r2.status===200) sbMsg('✓ 连接成功，文章表和照片表都已就绪。','ok');
+      else sbMsg('✓ 文章表已就绪；照片表 xy_photos 还没建——SQL 已更新，重新点「复制建表 SQL」运行一次即可同步照片。','err');
+    }).catch(function(){ sbMsg('✓ 文章表已就绪（照片表检查失败，可稍后再试）。','ok') });
   })
   .catch(function(e){ sbMsg('连不上：'+(e.message||'网络错误')+'。请检查地址和 Key，或稍后再试。','err') });
 }
@@ -1169,6 +1231,7 @@ function toast(msg){
 (function(){
   if(!location.hash) location.replace('#/home');
   onHash();
+  sbPhotoPull();                                // 打开页面就拉云端照片，谁换的全家可见
   window.addEventListener('hashchange',function(){ window.__fromHash=true });
 })();
 </script>
